@@ -1070,7 +1070,7 @@ fb[variable == c("CHL", "SPM"), QAlevel := 3] # Where the variable is equal to e
 to publish: SST, SAL, FTU, FLUORS, SPM, CHL, PAR
 
 ```{r netCDF}
-load("C:\\Users\\EH08\\Documents\\June 19\\juneferrrybox\\checking scripts\\2012-copy\\2012QA3_complete.rdata")
+load("C:\\Users\\EH08\\Documents\\June 19\\juneferrrybox\\checking scripts\\2015-copy\\2015QA3_complete.rdata")
 library(ncdf4)
 library(oce)
 fb = fb[QAlevel>=2 & Quality==0] #only qa 2 or higher 
@@ -1092,7 +1092,7 @@ fb_params=as.data.table(read.csv("C:\\Users\\EH08\\Documents\\June 19\\juneferrr
 #make netcdf
 #define dimensions
 #dimensions will be trajectory
-traj_dim=ncdim_def("trajectory", "", 1, longname="Cefas Endeavour Ferrybox Data 2012")
+traj_dim=ncdim_def("trajectory", "", 1, longname="Cefas Endeavour Ferrybox Data 2015")
 obs_dim=ncdim_def("obs", "", 1:length(unique(as.numeric(fb$dateTime))) )
 
 #define variables
@@ -1133,7 +1133,7 @@ rm(nc_var)
 }
 
 
-new_nc=nc_create("Fb2012.nc", test_list)
+new_nc=nc_create("Fb2015.nc", test_list)
 
 #now add data to netcdf
 #time
@@ -1217,7 +1217,7 @@ for (var in fb_params$telid){
   }
 }
 
-yr=2012
+yr=2015
 
 #write global attributes-to develop-not working yet
 ncatt_put(new_nc, 0, "id",paste(paste(yr,"fb",sep="")))
