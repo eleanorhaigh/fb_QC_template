@@ -1,0 +1,1447 @@
+---
+title: 2015 Ferrybox QC log 
+author: Tom Hull + Eleanor Haigh
+editor_options: 
+  chunk_output_type: console
+---
+# Set up
+These arethe packages you will need to load into you library - each time you open your r project
+```{r setup}
+require(cefasMOS, quietly=T)
+require(leaflet, quietly=T)
+require(dygraphs, quietly=T)
+require(ncdf4, quietly=T)
+require(dplyr, quietly=T)
+data("telids") # load list of instruments and telids from CefasMOS
+Sys.setenv(tz="UTC") #set environement time zone to utc
+source("C:\\Users\\EH08\\Documents\\June 19\\juneferrrybox\\checking scripts\\ferrybox_functions.R") #need to read in functions required for QC
+```
+
+# 10minute files to rdata PROCESS
+You may have already done this step, see SOP xxxx
+2016 data as an exmaple. 
+
+```{r process_data, eval = F}
+#fb2018 = read.ferrybox.10min("C:/FB/2015/", recursive = T, print_file = T)
+#save(fb2015, file = "C:/FB/fb2015.rdata")
+```
+
+# Known issues
+Below, insert the logged problems with the ferrybox over the year - taken from the FeryBox log txt file on the FB computer (can be accessed remotely).
+
+
+2015 log; 
+
+01-11-15 - FIXED new ship pump meant FB wasn't getting enough flow. Once tested empy valvues and flushed with fresh water, In and Main valves were ajusted and FB switched back o - BS
+30-10-15 - Ferrybox not working after pump change - not sure why. Half full error message. Restarted PC, now says it has no GPS feed - BS
+29-10-15 - PROBLEM Ferrybox ships main pump failed, engineers to replace - BS
+24-10-15 - software had crashed and was stuck in Standby. Restarted - BS
+03-10-15 - found fb computer switched off - when started jumpy mouse and no GPS signal - problem caused by computer recognising mouse as GPS. P. Bouch solved the problem unplugging GPS, rebooting computer and reconnecting GPS. E Capuzzo
+09-09-15 - Primary GPS input changed to Seapathm heading now available. GPS ini file changed to $IN from $GP to match NEMA - TH
+07-08-15 - "jumpy" mouse is caused by booting fb pc without sampler pc, sampler pc needs to boot first? - TH
+07-08-15 - optode A and B changed to salinity setting 34 - TH
+06-08-15 - Emergency stop button fitted, PC power moved to port CS4/14 - TH
+06-08-15 - cytobuoy sampling tube fitted. - TH
+05-08-15 - modifications made in software and plumbing for seafet, system does now not drain before wash cycle - TH
+03-06-15 - Seapoint replaced (2757 removed and replaced with 3616) - TH
+28-05-15 - POSSIBLE PROBLEM - Seapoint Flu sensitivity - TH
+07-05-15 - PROBLEM - tsg pump turned off but ferrybox pump kept running = empty-auto-off not working - TH
+05-05-15 - Phytoflash stuck 0 values, restarted module not work, complete FB reset did - TH
+22-02-15 - seafet reinstalled with salt solution valves, pCO2 nmea module updated TH
+
+
+# Pre Processing
+Here the initial steps are taken; 
+- Data loaded, duplicates removed.
+- Telemetry id's are translated and Meisberg Ph data removed.
+- Hull PRT variable is renamed SST for clarity.
+- Missing data removed.
+
+```{r pre_processing}
+load("C:\\Users\\EH08\\Documents\\June 19\\juneferrrybox\\checking scripts\\2015-copy\\fb2015.rdata") #load ferrybox data into r
+fb = copy(fb2015) # you will be working on a copy of the raw data
+rm(fb2015) #remove original copy
+
+  #de_duplication
+anyDuplicated(fb)# returns >0 if any duplicates
+fb = unique(fb) # removes duplicates (i.e where every row matches)
+
+  # (optional) translate flags, this will need to be repeated later
+fb[, Quality := as.numeric(Quality)]
+  # translate telid
+fb[, telid := as.numeric(telid)]
+fb = merge(fb, telids, by = "telid")  #merge to add column describing instrument
+  # strip out header details - these will be updated later
+fb[, Cruise := NULL]
+fb[, SIC := NULL]
+
+  # remove variables we don't care about
+  # don't worry about the pH sensor or sound velocity
+fb = fb[!(telid %in% c(2000, 2001, 1193))]
+
+ #unique(fb[,.(telid, variable, sensor_parameter)])
+
+  # rename hull PRT if not already - Sea Surface Temperature 
+fb[telid == 2064, variable := "SST"]
+
+  # remove missing data
+fb = fb[Count > 0]
+
+  # check for badly calculated means?
+nrow(fb[Mean > Max & !grepl("Vaisala", sensor_parameter)]) # known issues with Vaisala
+nrow(fb[Mean < Min & !grepl("Vaisala", sensor_parameter)])
+
+```
+
+Complete the above step before continuing
+
+# GPS
+
+- work with track file, unique points rather than every row
+- Check for impossible distances (dv/dt > 20knts)
+- Stuck values
+- add note of progess sheet if large amount of data removed ?add gps from conlog to recover
+
+There can be times when the gps on the FB fails.
+However in some circumstances the conlog data can be used.
+The conlog has a PC system time, but also the GGL time
+
+Next extract just the gps track.
+- Check the speed and course values are reasonable.
+- stuck values are checked for that lat, long and speed are not exactly the same
+- if they are it means we're on DP and we don't want the data anyway
+
+
+```{r gps}
+  # plot cruise track and identify bad points and misslabeled cruises
+#create object of just track information
+track = fb[,.(Latitude = unique(Latitude), Longitude = unique(Longitude),
+              Speed = unique(Speed), Course =  unique(Course)),
+           by = list(dateTime)]  
+
+anyDuplicated(track$dateTime) # check that GPS, Speed and Course are unique
+
+hist(track$Speed) # check speed is sensible
+hist(track$Course) # check course is sensible
+
+  # check that speed does not exactly equal course - known problem
+track[Speed == 0 & Course == 0, c("Speed", "Course") := NA]
+track[Speed == Course, c("Speed", "Course") := NA]
+
+ggplot(track)+geom_point(aes(dateTime,Course)) #plot to see if course looks ok
+ggplot(track)+geom_point(aes(dateTime,Speed)) #plot to see if speed looks ok
+#track[,Course:=NA] #remove course if needed 
+#track[,Speed:=NA] #remove speed if needed
+
+  # remove non-minute data (where timestamps are incorrect, not exactly on th minute)
+track = track[lubridate::second(dateTime) == 0]
+
+track[Longitude == 0 & Latitude == 0, c("Latitude", "Longitude") := NA] # remove 0,0 position if present
+
+  # find other stuck values
+track[Latitude == shift(Latitude) &
+        Longitude == shift(Longitude) &
+        Speed == shift(Speed),
+      stuck := T]
+
+track = track[is.na(stuck)] # removing stuck values
+```
+
+Check that no points are over land.
+Eval=F is used as this is a computationally expensive task.
+
+```{r over_land, eval=F}
+#find any nas in coordinates- raise as issue if there are long sections
+
+perc=(sum(is.na((track[,Latitude])))/length((track[,Latitude])))*100 #percentage of lat coordinates missing, if this number is large may need to explore conlog
+
+#create version of track without nas in long and lat
+test=na.omit(track,c("Latitude","Longitude"), invert=F)
+
+#create spatial object using track file
+points_sp = sp::SpatialPoints(test[,.(Longitude, Latitude)],
+                           proj4string=sp::CRS("+proj=longlat +datum=WGS84"))
+#warning re resolution can be ignored, using low resolution fine for visual check
+#create spatial object of world map
+poly = sp::spTransform(rworldmap::getMap("high"), sp::CRS("+proj=longlat +datum=WGS84"))
+
+#compare spatial object to see where track falls onto land
+overlaps = is.na(sp::over(points_sp, poly)$NAME)
+#create new column that returns TRUE where overalp occurs
+test[!overlaps, overland := T]
+
+  # check where these points are that fall over land
+if(any(test$overland)){
+  leaflet(test[overland == T]) %>%
+    addTiles() %>%
+    addCircles(~Longitude, ~Latitude, popup = ~paste(dateTime))
+}
+
+#merge overland points back to original track object 
+track=merge(track,test[,.(dateTime, overland)], by="dateTime", all.x=TRUE ) 
+
+#then remove flagged overland points if needed
+#track = track[is.na(overland)]
+```
+
+Checking and recalculating speed
+
+```{r recalculate_speed}
+
+
+  # recalculate speed and course from GPS
+track = track[order(dateTime)] #order by date
+track[, CourseC := ferrybox.course(dateTime, Latitude, Longitude, threshold = 61)]  #function calculates course from gps
+track[, SpeedC := ferrybox.speed(dateTime, Latitude, Longitude, threshold = 61)] #function calculates speed from gps
+
+track[SpeedC == 0]  # check no exactly zero speed
+
+  # do calculated values match those the ferrybox has recorded, should have 1:1 relationship?
+plot(track$Speed, track$SpeedC) #plot calculated speed vs ferrybox speed
+plot(track$Course, track$CourseC) #plot ferrybox course vs actual course
+
+nrow(track[is.na(Speed)]) #how many rows don't have speed
+nrow(track[is.na(Course)]) #how many rows don't have course
+
+#if there are lots of rows without speed or course, and calculated values agree well with those from the ferrybox then we can replace missing values with calculated
+#track[is.na(Speed), Speed := SpeedC]
+#track[is.na(Course),Course:=CourseC]
+
+```
+
+# Cruise names
+
+filling in the cruise names throughout the year
+
+```{r gap_minder}
+#check for missing cruises in fb data 
+  # gap minder, check for missing cruises
+track = track[order(dateTime)] #order by date
+track[, time_diff := as.numeric(dateTime) - shift(as.numeric(dateTime))]  #find time difference between current point in track and previous
+track[time_diff > 60*60*24]  #find when the difference between one track point and the next is greater than a day, this should line up with dates of cruises, but there may be occasions where the ferrybox failed so large chunks are missing
+```
+
+```{r cruises}
+cruises = fread(file = "C:/Users/EH08/Documents/June 19/juneferrrybox/checking scripts/2015-copy/cruises2015.csv")  # read in a csv of cruise dates for given year, must follow same format as previous years csvs 
+cruises[, Start := as.POSIXct(Start, tz = "UTC", format = "%d/%m/%Y")] # format is the date format of your read in csv
+#where cruises turnaround on the same day, time will need to be added to both the csv and this format section to avoid the same day being assigned two cruises
+cruises[, End := as.POSIXct(End, tz = "UTC", format = "%d/%m/%Y")]
+
+  # add cruise information to track
+track[, dt2 := dateTime]
+setkey(track, dateTime, dt2) # dt2 needed for foverlaps, fast matching in range
+track = foverlaps(cruises, track, by.x = c("Start", "End")) #find were cruise dates overlap ferrybox data 
+track = track[,.(dateTime, Latitude, Longitude, Course, Speed, Cruise)] #enure track contains only columns needed
+track = track[!is.na(dateTime)] #remove rows in track that do not have a date and time associated with them 
+
+  # allocate colors for leaflet
+cruise_pal = colorFactor("Set1", unique(cruises$Cruise))
+
+  # increase month (change 1:12, to individual intergers) to step though data-check that cruise tracks make sense 
+leaflet(track[month(dateTime) == 1:12]) %>%
+  addTiles() %>%
+  addCircles(color = ~cruise_pal(Cruise), popup = ~paste(dateTime)) %>%
+  addLegend(pal = cruise_pal, values = ~Cruise)
+
+  # may nedd to edit cruises csv and repeat process as needed
+```
+
+# Flow lag
+
+There is a time a lag between the water entering the boat inlet to actually entering the FB system, therefore we need to correct for this lag.
+Typically 3 minutes, confirm lag is consistent over time between SST and seabird temperature.
+
+```{r flow_lag}
+dygraph(dcast.data.table(fb[telid %in% c(2064, 1190) & Quality == 0],
+                         dateTime ~ variable, value.var = "Mean")) # using this dygraph you can visualise the flow lag by comapring hull prt to in ferrybo temperature
+
+fb[in_fb_loop == T, dateTime := dateTime - 60*3] #apply lag of 3 minutes to data that is within the ferrybox loop
+
+```
+
+
+# combine track file
+
+writing back the changes made in the track file to the fb data
+```{r merge_track}
+  # write back track and cruise data
+fb[,c("Latitude", "Longitude", "Course", "Speed", "Cruise") := NULL] #remove columns from fb that are going to be replaced 
+fb = merge(fb, track[,.(dateTime, Latitude, Longitude, Course, Speed, Cruise)],
+      by = c("dateTime"), all.x = T) #merge track and fb objects
+fb = fb[!is.na(Latitude) | !is.na(Longitude)] # remove where no position
+rm(poly,points_sp, overlaps, cruise_pal) #remove objects no longer needed 
+```
+
+## Flow rates
+
+For this step we check the flow rates and flwo pressure within the fb system is OK.
+
+```{r flow_rates}
+
+#flipping the datatable with specific varaible columns; FLOWIN, FWMAIN, FBPRES
+flow = dcast.data.table(fb[variable %in% c("FLOWIN", "FWMAIN", "FBPRES")],
+                        dateTime + Longitude + Latitude + Cruise ~ variable, value.var = "Mean") 
+flow[, FRATIO := FLOWIN / FWMAIN] #calculate flow ratio for qc
+
+#visually checking flow and pressure parameters
+hist(flow$FBPRES)
+hist(flow$FLOWIN, breaks = 60)
+hist(flow[FRATIO > 0]$FRATIO, breaks = 60)
+
+#assigning flow ok flags 
+flow[, flow_ok := F] #here you create a new column where all values == F
+flow[FRATIO > 2 & FRATIO < 5, flow_ok := T] # where the fratio is between 2 and 5, the flow is good
+flow[FLOWIN < 15 | FBPRES < 150, flow_ok := F] # where flowin is less than 15 and pressure less than 150, flow is bad
+summary(flow) #see how many rows are flagged as having bad flow 
+
+#visual check
+ggplot(flow[flow_ok == T]) +
+  geom_point(aes(dateTime, FRATIO))
+
+  # if we're happy write back  to main data file fb
+fb = merge(fb, flow[,.(dateTime, Latitude,Longitude, Cruise, flow_ok)], by = c("dateTime", "Cruise", "Longitude", "Latitude"), all.x = T)
+anyDuplicated(fb) #should return zero
+nrow(fb[in_fb_loop == T & Quality == 0 & flow_ok == F]) #number of rows where flow was not ok
+rm(flow) # tidy up the workspace environment
+
+fb[flow_ok != T & in_fb_loop == T & Quality == 0, Quality := 6] # if in loop and flow bad add flag
+fb[is.na(flow_ok) & in_fb_loop == T & Quality == 0, Quality := 6] # if in loop and no flow data, add flag
+fb[, c("flow_ok") := NULL] #removing flow_ok column
+
+```
+
+# Wash cycle flagging
+
+The ferrybox applies a flag (#64) to in-loop variables during the wash cycle.
+It also applies a flag for a cool-down period after the wash, while the pipework cools.
+This period is controlled in the ferrybox software.
+Lets check the period is long enough and apply more flags if needed.
+
+```{r post_wash}
+  # just work with a single variable for clarity(seabird temp)
+wash = fb[telid == 1190]
+wash[grepl(ferrybox.errorcode(64),ferrybox.errorcode(Quality)),flag:=T] #if error code is 64 the value was recorded during cleaning so needs a wash flag
+nrow(wash[flag==T]) #how many rows have a wash flag, may be zero as some is automatically removed 
+wash[, time_diff := as.numeric(dateTime) - shift(as.numeric(dateTime))] #calculate difference between time points
+wash[,temp_diff := Mean - (shift(Mean, n=1))] #calculate difference in temperature between points
+
+nrow(wash[time_diff > 5*60]) #where time gap is greater than 5 mins-may indicate wash occured
+nrow(wash[(abs(temp_diff)) > 1])  #where temp difference is greater than 1 between time steps
+nrow(wash[time_diff >5*60 & (abs(temp_diff)) > 0.5]) #number of rows where time_diff is >5mins and temperature change +/- 0.5, these may indictae a rise in temperature due to a wash 
+
+
+ # using 5 minute gap in data as indicator of wash, bit of a hack
+wash[time_diff > 5*60, flag := F]
+wash_times = wash[time_diff > 5*60]$dateTime
+table(wash$flag)
+
+wash[, id := month(dateTime)]
+ggplot(wash[month(dateTime) == 1:12]) +
+  geom_point(aes(dateTime, Mean, color=flag)) +
+  scale_x_datetime(date_minor_breaks="day") +
+  facet_wrap("id", scales="free")
+
+ggplot(wash[month(dateTime) == 2]) +
+  geom_point(aes(dateTime, Mean, color=flag)) +
+  scale_x_datetime(date_minor_breaks="day")
+
+```
+
+If it is decided more data needs to be flagged after the acod wash, then follow the step below. 
+
+Example; 2016 fb data
+Looking at Jan and Feb it looks like post wash needs more flagging.
+
+```{r flag_more_wash}
+
+length(unique(as.Date(wash$dateTime)))
+length(wash_times) # there should be roughly 1 wash per day, plus extras for going into port / servicing
+
+wash[, wash_flag := lagged_flag(dateTime, wash_times, 600)] # add flag 10 mins after wash times as identified by a gap of 5 minutes or more
+wash = wash[wash_flag == T]$dateTime #times where wash is falgged as happening 
+
+  # write these flags back to the data
+fb[in_fb_loop == T & dateTime %in% wash, Quality := Quality + 64] #match times where wash was happening to times in ferrybox data set and add quality flag 
+
+ggplot(fb[variable == "TEMP" & month(dateTime) == 1]) +
+  geom_point(aes(dateTime, Mean, color=as.factor(Quality))) #cycle through month by month to see if flagging is sufficient 
+
+```
+
+# Oxygen
+
+There are various known issues with oxygen.This will stay at QA1.
+
+```{r oxygen}
+
+#use these plots to check for obviously unrealistic values, eg -ves
+hist(fb[Quality == 0 & variable == "O2SAT"]$Mean)
+range(fb[Quality == 0 & variable == "O2SAT"]$Mean)
+
+#plot with time 
+ggplot(fb[variable == "O2SAT" & Quality == 0]) +
+  geom_line(aes(dateTime, Mean, color = Cruise))
+#if any values seem unrealistic, remove
+
+
+#test for stuck values and flag
+#apply function to oxygen optode, ie telid 1097, to detect repeats of 3 or more where instrument was stuck
+stuck_value(fb, 1097, 3)
+fb=w #replace fb with table ouput from function #check product (w) is correct before replacing
+rm(tester, y, w) #remove variables generated by function
+#fb=fb[,telidspecreps:=NULL]
+fb[stuck==T & telid==1097 & Quality==0, Quality:=Quality+1] #add qaulity flag where stuck values identified
+
+```
+
+#Quantum Yield 
+
+Only basic level checks are made here, this will stay at QA1.
+```{r Quantum yield}
+#NOTE only basic level 1QA has been done here really. 
+#use these plots and tests to identify obviously unrealistic values
+hist((fb[variable == "QYIELD"]$Variance), breaks=1000)
+hist(sqrt(fb[variable == "QYIELD"]$Variance), breaks=1000)
+
+range(fb[Quality == 0 & variable == "QYIELD"]$Mean)
+
+ggplot(fb[variable == "QYIELD"]) +
+  geom_point(aes(dateTime, Mean, color=as.factor(Quality)))
+
+ggplot(fb[variable == "QYIELD" & Quality==0]) +
+  geom_point(aes(dateTime, Mean))
+
+#test for stuck values and flag
+stuck_value(fb, 1164, 3) #tests telid 1164 for repeats of 3 or more 
+fb=w #replace fb with table output from function
+rm(tester, y, w) #remove variables generated by function
+fb=fb[,telidspecreps:=NULL] #remove variables generated by function
+fb[stuck==T & telid==1164 & Quality==0, Quality:=Quality+1] #add qaulity flag where stuck values identified
+
+```
+  
+# Met
+Only basic level checks are made here, this will stay at QA1.
+
+```{r windspd}
+
+  # convert to SI
+  # fb is actually in knots despite what it logs
+fb[variable %in% c("WINDSP", "WINDRS"), Mean := Mean * 0.514]
+fb[variable %in% c("WINDSP", "WINDRS"), Max := Max * 0.514]
+fb[variable %in% c("WINDSP", "WINDRS"), Min := Min * 0.514]
+
+#test for stuck values and flag #WINDSP
+stuck_value(fb, 	2133, 3)  
+fb=w
+rm(tester, y, w)
+fb=fb[,telidspecreps:=NULL]
+fb[stuck==T & telid==	2133 & Quality==0, Quality:=Quality+1]
+
+#test for stuck values and flag #WINDRS
+stuck_value(fb, 	2134, 3)
+fb=w
+rm(tester, y, w)
+fb=fb[,telidspecreps:=NULL]
+fb[stuck==T & telid==	2134 & Quality==0, Quality:=Quality+1]
+
+
+#use plots and checks to identify obviously unrealistic values, remove values if needed 
+hist(fb[variable == "WINDRS" & Quality == 0]$Mean)
+
+dygraph(fb[variable %in% c("WINDSP") & Quality==0 ,.(dateTime, Mean)])
+dygraph(fb[variable %in% c("WINDRS") & Quality==0 ,.(dateTime, Mean)])
+
+```
+
+
+#Saving QA1 Complete data
+
+```{r, QA1 complete}
+
+#Add QAlevel flag to current data table 
+fb[, QAlevel := 1]
+
+#Saving completed QA1 data
+fb[,stuck:=NULL] #remove stuck column
+fb=as.data.table(fb) #make sure file is saved as data table 
+save(fb, file="C:/Users/EH08/Documents/June 19/juneferrrybox/checking scripts/2015-copy/fb2015_QA1Complete.rdata")
+#any other QA done must be worked from this saved rdata file 
+```
+
+#QA2 
+# Temperatures
+Now we start QA2 porcesses; checking and correcting parameters. Temperature, salinity and fluorescence are done first and are a higher priority. 
+
+```{r temperature}
+load("C:\\Users\\EH08\\Documents\\June 19\\juneferrrybox\\checking scripts\\2015-copy\\fb2015_QA1Complete.rdata")
+anyDuplicated(fb) #check for duplicates, if there are any something has gone wrong in QA1
+
+dygraph(dcast.data.table(fb[variable %in% c("SST", "TEMP") & (Quality == 0)])) #intial plot to look at data
+
+fb[variable == "SST" & Mean <= 0 & Quality == 0, Quality := 1] # flag as below minimum
+fb[variable == "TEMP" & Mean <= 0 & Quality == 0, Quality := 1] # flag as below minimum
+
+  # any SST data above 25 degress is nonsense
+fb[variable == "SST" & Mean > 25 & Quality == 0, Quality := 1] # flag as above maximum
+fb[variable == "TEMP" & Mean > 25 & Quality == 0, Quality := 1] # flag
+
+  # flag data where standard deviation too high
+fb[variable %in% c("SST", "TEMP") & sqrt(Variance) > 0.2, Quality := 1024]
+
+#check for stuck values and flag #SST
+stuck_value(fb, 1190, 3)
+fb=w
+rm(tester, y, w)
+fb=fb[,telidspecreps:=NULL]
+fb[stuck==T & telid==1190 & Quality==0, Quality:=Quality+1]
+
+#check for stuck values and flag #TEMP
+stuck_value(fb, 2064, 3)  
+fb=w
+rm(tester, y, w)
+fb=fb[,telidspecreps:=NULL]
+fb[stuck==T & telid==2064 & Quality==0, Quality:=Quality+1]
+
+#check for stuck values #optode TEMP
+stuck_value(fb, 1098, 3) 
+fb=w
+rm(tester, y, w)
+fb=fb[,telidspecreps:=NULL]
+fb[stuck==T & telid==1098 & Quality==0, Quality:=Quality+1]
+```
+
+```{r temperature_SST_vs_TEMP}
+#first make a new object called TEMP
+  # self merge to match SST to TEMP
+  # quality bits are split into SST and TEMP
+TEMP = merge(fb[variable == "SST",
+                .(dateTime, SST = Mean, SST.sd = sqrt(Variance),
+                  PRT_SERIAL = serial, PRT_TELID=telid, Cruise, SST_Quality = Quality,Speed)],
+             fb[variable == "TEMP",
+                .(dateTime, TEMP = Mean, TEMP.sd = sqrt(Variance),
+                  telid, serial, sensor_parameter,TEMP_Quality = Quality)],
+             by = "dateTime", all = T) 
+
+unique(TEMP[,.(sensor_parameter,serial,PRT_SERIAL)]) #check how many instruments used
+
+  # plot all temperature parameters vs SST
+  # temperatures should closely track SST -if they dont may need to flag out 
+ggplot(TEMP[TEMP_Quality == 0 & SST_Quality == 0]) +
+  geom_point(aes(TEMP, SST, color = paste(sensor_parameter, serial))) +
+  coord_equal()
+
+  # dTEMP check
+  # rate of change of temperature should not be crazy for either
+TEMP[, SST_dt := rate_of_change(dateTime, SST), by = serial] #calc rate of change
+TEMP[, TEMP_dt := rate_of_change(dateTime, TEMP), by = serial]
+
+hist(TEMP[grepl("Seabird", sensor_parameter) & SST_Quality == 0]$SST_dt) 
+hist(TEMP[grepl("Seabird", sensor_parameter) & TEMP_Quality == 0]$TEMP_dt)
+
+  # check rate of change again
+ggplot(TEMP[grepl("Seabird", sensor_parameter) & SST_Quality == 0]) +
+  geom_point(aes(dateTime, SST_dt))
+
+  # apply flags for high rate of change
+TEMP[SST_Quality == 0 & abs(SST_dt) > 0.020, SST_Quality := 1024]
+TEMP[TEMP_Quality == 0 & abs(TEMP_dt) > 0.020, TEMP_Quality := 1024]
+
+# flag out where prt temp is >0.5 deg higher than in ferrybox measuers of temperature-this indicated where prt was measuring out of air temp ie. remained retracted for times when ferrybox was on 
+TEMP[SST > (TEMP+0.5), SST_Quality := 1024]
+
+
+  # fit linear models between SST and TEMP # create a new object x to work with 
+x = TEMP[TEMP_Quality == 0 & SST_Quality == 0 & !is.na(Cruise)]
+plot(x$TEMP, x$SST) #should have 1:1 relationship
+fit = lm(data = x, SST ~ TEMP)
+#plot(fit)
+coef(fit) #returns coefficients of fits 
+
+fits = lapply(unique(x$Cruise),
+              function(z) lm(SST ~ TEMP, data = x[Cruise == z,]
+                             )) # apply lm to each cruise
+names(fits) = unique(x$Cruise) 
+sapply(fits, coef) #get coefficient of fit for each cruise
+barplot(sapply(fits, function(x) sd(residuals(x))), main = "SD residuals by Cruise") #bar plot residuals of fits for each cruise 
+
+#final visual check, onlt seabird temp has been qcd
+ggplot(x[TEMP_Quality == 0 & SST_Quality == 0]) +
+  geom_point(aes( SST,TEMP, color = paste(sensor_parameter, serial))) +
+  facet_wrap("Cruise",scale="free")
+
+```
+
+Writing back TEMP flags to fb
+
+```{r writeback_temp}
+  # these should be the same length! This is just a check.
+if(length(unique(TEMP$dateTime)) != length(unique(fb$dateTime))){
+  warning("TEMP is the wrong size, something has gone wrong")
+}
+
+#write back qual flags with two seperate merges
+#TEMP
+fb=merge(fb, TEMP[,.(dateTime, TEMP_Quality, telid, serial)], by=c("dateTime", "telid", "serial"), all.x=T)
+fb[!is.na(TEMP_Quality), Quality := Quality+TEMP_Quality]
+fb[,"TEMP_Quality":=NULL]
+#SST
+fb=merge(fb, TEMP[,.(dateTime, SST_Quality, serial=PRT_SERIAL, telid=PRT_TELID)], by=c("dateTime", "telid", "serial"), all.x=T)
+fb[!is.na(SST_Quality), Quality := Quality+SST_Quality]
+fb[,"SST_Quality":=NULL]
+fb=unique(fb)
+
+#final visual check
+dygraph(dcast.data.table(fb[telid %in% c(2064, 1190, 195, 1098) & Quality == 0],
+                         dateTime ~ telid, value.var = "Mean"))
+
+#remove leftover areas where prt out of water
+
+```
+
+```{r compare to profiler}
+
+#set cruise id,parameter, min qa reached for profiler fetch function
+cruiseID=NA
+parameters = c("TEMP")
+min_QA_reached = F
+smartbuoy_db_name = "smartbuoydblive"
+#set date range
+after=min(fb$dateTime)
+before=max(fb$dateTime)
+
+#extract profiler data-takes a long time has already been run and saved-must be run again if new profilers added 
+
+# ctd = profiler.fetch (cruiseID = cruiseID, after=after, before=before, parameters = parameters, db_name = smartbuoy_db_name, #min_QA_reached =    min_QA_reached)
+    #ctd = ctd[depth > 3.5 & depth < 4.5] #only want prt depths
+    #ctd[, `:=`(dateTime, as.POSIXct(round(as.numeric(dateTime)/60) * 
+       # 60, origin = "1970-01-01", tz = "UTC"))] #round to nearest minute
+    #ctd = ctd[, .(value = mean(value)), by = list(dateTime, site, 
+        #latitude, longitude, sensor, par, cruise, profiler)] #only info of interest
+    #ctd=ctd[grepl("CEND",cruise,ignore.case = TRUE)] #only want cend cruises
+    #save(ctd,file="profilerdata.rdata")
+
+
+setwd("C:/Users/EH08/Documents/June 19/juneferrrybox/checking scripts/2015-copy")
+load("profilerdata.rdata")
+
+    
+    #get ferrybox sst/prt data needed
+        proffb = fb[sensor_parameter == "ADAM PT100 PRT - parameter 1" & Quality==0] #get prt data
+    proffb = proffb[, .(sensor_parameter, variable, dateTime, Latitude, Longitude, ferrybox_speed = Speed, 
+        Mean)] #get only columns needed
+    setkey(proffb, dateTime, variable)
+    setkey(ctd, dateTime, par)
+    
+    #merge profiler and prt
+        matched = merge(proffb, ctd, suffixes = c("_ferrybox", "_profiler"))
+    setcolorder(matched, order(colnames(matched)))
+    
+    #get ferrybox temp/sebird data needed
+    seabfb = fb[sensor_parameter== "Seabird SBE45 Thermosalinograph - parameter 1" & Quality==0] #get only ferrybox seabird temp
+    seabfb = seabfb[, . (sensor_parameter,variable,dateTime,Latitude,Longitude,ferryox_speed=Speed, Mean)]
+    setkey(seabfb,dateTime,variable)
+    
+    #mearge profiler and seabird
+    matchedsb=merge(seabfb,ctd,suffixes=c("_ferrybox", "_profiler"))
+    setcolorder(matchedsb,order(colnames(matchedsb)))
+    
+        #generate eqn for prt vs profiler
+    eq = matched[, .(eq = lm_eqn(value, Mean), 
+        xpos = min(value) + ((max(value - min(value))/2)), 
+        ypos = max(Mean)), by = list(cruise, variable)]
+    
+    #generate equation for fb seabird vs profiler
+        eq2 = matchedsb[, .(eq2 = lm_eqn(value, Mean), 
+        xpos2 = min(value) + ((max(value - min(value))/2)), 
+        ypos2 = max(Mean)), by = list(cruise, variable)]
+    
+    
+    #plot prt vs both profiler and seabird
+    plt = ggplot() + 
+        geom_point(data=matched,aes(value, Mean)) + geom_point(data=matchedsb,aes(value,Mean)) + geom_smooth(data=matched, aes(value, Mean), method = "lm") + geom_smooth(data=matchedsb, aes(value, Mean), method = "lm",color="red") + geom_text(data = eq, 
+        aes(x = xpos, y = ypos, label = eq), parse = T) + geom_text(data = eq2, 
+        aes(x = xpos2, y = ypos2, label = eq2), parse = T)+ facet_wrap("cruise", scales = "free") + theme_bw() +labs( x = "Profiler FSI CT Module", y = "PRT (Blue) or Ferrybox seabird (Red)")
+    print(plt)
+    list(data = matched, plot = plt) #lists matched data between profiler, prt and seabird 
+    
+    #save ctd dta for later use
+   # save(ctd,file="profilerdata.rdata")
+    
+```
+
+```{r compare to rosette}
+#find ctd files in network folder and list cruises that have data #change year in path
+ctdfolders=list.files(path="Y:/SmartBuoyData/CTD - SBE/2017",full.names=TRUE)
+
+   substrRight<- function(y, n){
+  substr(y, nchar(y)-n+1, nchar(y))
+   } #function to extract cruise name from directory
+   
+   cruises=lapply(ctdfolders,substrRight,n=10) # apply function to get list of cruises with ctd profiles
+   cruises=unlist(cruises)# list->vector
+   ctdpositions<-list()#predefine lists for read_ctd fucntion
+   ctddata<-list()
+   finalctddata<-list()
+
+lapply(c(2:length(cruises)),read_ctd) #apply function to read in data for each cruise #cend_02 not qcd?
+
+  stationdataf=rbindlist(finalctddata, fill=T) #list->data table 
+  
+      #get ferrybox sst/prt data needed
+        proffb = fb[sensor_parameter == "ADAM PT100 PRT - parameter 1" & Quality==0] #where no quality flags
+    proffb = proffb[, .(sensor_parameter, variable, dateTime, Latitude, Longitude, ferrybox_speed = Speed, 
+        Mean, Cruise)]  #get columns needed
+    setkey(proffb, dateTime, variable) 
+    
+    #get ferrybox temp/sebird data needed
+    seabfb = fb[sensor_parameter== "Seabird SBE45 Thermosalinograph - parameter 1" & Quality==0]
+    seabfb = seabfb[, . (sensor_parameter,variable,dateTime,Latitude,Longitude,ferryox_speed=Speed, Mean, Cruise)]
+    setkey(seabfb,dateTime,variable)
+
+    setkey(stationdataf, dateTime)# !!!!
+    
+        #merge ctd rosette and prt
+        matched = merge(proffb, stationdataf, suffixes = c("_ferrybox", "_ctd"))
+    setcolorder(matched, order(colnames(matched)))
+    
+        #mearge seabird and profiler
+    matchedsb=merge(seabfb,stationdataf,suffixes=c("_ferrybox", "_ctd"))
+    setcolorder(matchedsb,order(colnames(matchedsb)))
+
+#plot
+        #generate eqn for prt vs profiler
+    eq = matched[, .(eq = lm_eqn(temperature, Mean), 
+        xpos = min(temperature) + ((max(temperature - min(temperature))/2)), 
+        ypos = max(Mean)), by = list(Cruise, variable)]
+    
+    #generate equation for fb seabird vs profiler
+        eq2 = matchedsb[, .(eq2 = lm_eqn(temperature, Mean), 
+        xpos2 = min(temperature) + ((max(temperature - min(temperature))/2)), 
+        ypos2 = max(Mean)), by = list(Cruise, variable)]
+    
+    
+    #plot prt vs both profiler and seabird
+    plt = ggplot() + 
+        geom_point(data=matched,aes(temperature, Mean)) + geom_point(data=matchedsb,aes(temperature,Mean)) + geom_smooth(data=matched, aes(temperature, Mean), method = "lm") + geom_smooth(data=matchedsb, aes(temperature, Mean), method = "lm",color="red") + geom_text(data = eq, 
+        aes(x = xpos, y = ypos, label = eq), parse = T) + geom_text(data = eq2, 
+        aes(x = xpos2, y = ypos2, label = eq2), parse = T) + facet_wrap("Cruise", scales = "free") +theme_bw() +labs( x = "CTD rosette", y = "PRT (Blue) or Ferrybox seabird (Red)")
+    print(plt)
+    list(data = matched, plot = plt)
+
+```
+
+
+# Salinity
+Now we look at salinity. The  seabird salinometer is very stable, and usually has a relationship close to 1 with discrete sample. Best to check though. 
+
+```{r salinity}
+#plots to check values initially seem reasonable 
+hist(fb[variable == "SAL" & Quality == 0]$Mean, breaks = 36)
+hist(sqrt(fb[variable == "SAL" & Quality == 0]$Variance), breaks = 10)
+range(fb[variable == "SAL" & Quality == 0]$Mean)
+
+#visualise where low sals are-in mouth of river for eg, low salinity may be believable 
+leaflet(fb[variable == "SAL" & Quality == 0 & Mean < 31]) %>%
+  addTiles() %>%
+  addProviderTiles(providers$Esri) %>% 
+  addCircles(color = "red", popup = ~paste(dateTime ,Cruise ,Mean)) 
+
+#check for stuck values and flag #SAL
+stuck_value(fb, 1192, 3)  
+fb=w
+rm(tester, y, w)
+fb=fb[,telidspecreps:=NULL]
+fb[stuck==T & telid==1192 & Quality==0, Quality:=Quality+1]
+
+```
+
+```{r lims}
+#discrete sample comparison
+#use lims.fetch() function to extra salinity data in year range from the lims database
+lims = lims.fetch(parameters=c("SAL"), after=min(fb$dateTime), before=max(fb$dateTime))#this is extracting data from lims after the first dateTime
+lims=lims[depth>2 & depth<6] #only want depths near inlet
+lims[, `:=`(dateTime, as.POSIXct(round(as.numeric(dateTime)/60) * 
+        60, origin = "1970-01-01", tz = "UTC"))]   #round to nearest minute
+lims=lims[,.(dateTime,latitude,longitude,gear, value,depth, survey,variable)] #only info of interest
+lims=lims[grepl("CEND",survey,ignore.case = TRUE)] #only cend cruises
+setkey(lims,dateTime,variable)
+
+
+#You can extract data survey by surevy if needs be
+#lims19_17SAL = lims[survey == "CEND 19/17"] # sal
+
+#extract sal data from ferrybox
+sal=fb[sensor_parameter=="Seabird SBE45 Thermosalinograph - parameter 3" & Quality==0] 
+sal=sal[,.(sensor_parameter, dateTime, Longitude, Latitude, Speed, Mean, variable,serial)]
+    setkey(sal,dateTime,variable)
+
+#then merge fb and lims2
+#from this new limsMerge object you can now run a regression of fb salinity against discrete salinity
+xy= merge(sal, lims, suffixes=c("_ferrybox","_discrete"))
+
+        #generate eqn for sal vs discrete for each serial no
+    eq = xy[, .(eq = lm_eqn(value, Mean), 
+        xpos = min(value) + ((max(value - min(value))/2)), 
+        ypos = max(Mean)), by = list(serial, variable)]
+
+    #plot discrete vs fb salinity
+    ggplot(xy)+geom_point(aes(value,Mean))+geom_smooth(aes(value,Mean),method="lm") + geom_text(data = eq, 
+        aes(x = xpos, y = ypos, label = eq), parse = T) + facet_wrap("serial", scales = "free") + theme_bw() +labs( x = "Discrete sample salinity (2-6m)", y = "Ferrybox seabird salinity")
+    
+
+#now apply factors and offsets to the data if needed
+    coes=xy[,lm(Mean~value)] 
+    #fb[sensor_parameter=="Seabird SBE45 Thermosalinograph - parameter 3", Mean:= (Mean-coes$coefficients[1])/coes$coefficients[2]]
+    
+
+```
+
+```{r XXXX}
+setkey(fb, NULL) # removing any keys we have set so far
+anyDuplicated(fb)
+
+```
+
+# Flurometry
+
+Next we check and correct fluorescence
+There can be multiple fluoremeters used in one year. Will need to check what fluoroms have been used - see how many snsor ids have been recorded.
+
+Example; 2016 
+Two seapoint fluorometers were used during 2016: 2757 & 3616.
+They have very difference responses.
+
+```{r Flu}
+unique(fb[grepl("FLU", variable), .(sensor_parameter,telid,variable,serial)]) #list number of fluorometes used
+
+fb[variable %in% c("FLUORS", "FLUMAX") & Mean == 0 & Quality ==0, Quality := 1] # it is unlikely that mean will == 0 
+
+  # you are comparing the flumax (a known constant fluoremeter) to the seabird fluoroms
+#we are just checking the relationship/behaviour of the fluoroms here - not correcting anything yet.
+
+#check for stuck values nad flag #FLUORS
+stuck_value(fb, 144, 3)  
+fb=w
+rm(tester, y, w)
+fb=fb[,telidspecreps:=NULL]
+fb[stuck==T & telid==144 & Quality==0, Quality:=Quality+1]
+
+#check for stuck values and flag #FLUMAX
+stuck_value(fb, 1161, 3) 
+fb=w
+rm(tester, y, w)
+fb=fb[,telidspecreps:=NULL]
+fb[stuck==T & telid==1161 & Quality==0, Quality:=Quality+1]
+
+#Make a new datatable called FLU 
+FLU = dcast.data.table(fb[variable %in% c("FLUORS", "FLUMAX") & 
+Quality == 0],dateTime + Cruise ~ variable + serial, value.var = c("Mean")) #fun agg as most are not identified as repeats
+
+lm(data = FLU, FLUMAX_2500127 ~ FLUORS_2757) # you are just looking at the relationship here between flumax and fluors
+lm(data = FLU, FLUMAX_2500127 ~ FLUORS_3616) # these coefs are not applied 
+
+
+#now create daattabe x to work with, containing only good data from fluorometers
+x = fb[variable %in% c("FLUORS", "FLUMAX") & Quality == 0]
+x = dcast.data.table(x, dateTime ~ variable, value.var = "Mean", fun.aggregate=mean)
+x = merge(x, fb[variable == "FLUORS",.(dateTime, serial, Cruise)], by = "dateTime")
+
+x[, id := month(dateTime)] # id for each month 
+
+
+
+#plotting fluors with flumax to see relationship
+ggplot(x[FLUMAX < 10000 & id %in% c(1:12)], aes(FLUMAX, FLUORS)) +
+  geom_point(aes(shape = serial)) +
+  geom_point(aes(FLUMAX, FLUORS), color = "red", size=0.25) +
+  geom_smooth(aes(color = serial), method = lm)
+
+#visualise by month
+ggplot(x[FLUORS < 50], aes(FLUMAX, FLUORS)) +
+  geom_point(aes(color = serial), size = 0.025) +
+  facet_wrap("id")
+
+fits = lapply(1:12, function(z) lm(FLUORS ~ FLUMAX, data = x[id == z,])) # apply lm to each element(month) - to get an idea of behaviour over the year
+sapply(fits,coef)
+#the flumax is around x1000 larger than fluorometer values. We are just exploring the data here
+lm(data=x[serial==2757], FLUMAX/1000 ~ FLUORS)
+lm(data=x[serial==3616], FLUMAX/1000 ~ FLUORS)
+
+dygraph(FLU[,.(dateTime, Scaled_FLUMAX = FLUMAX_2500127/1000, FLUORS_2757, FLUORS_3616)]) # this is a good visual tool
+
+#if relationship between given fluorometer and phytoflash is consistent then can continue
+
+  # check for high variance and flag if needed
+fb[variable == "FLUORS" & Quality == 0 & sqrt(Variance) > 1, ]
+```
+
+After exploring the fluorescence data, we can now apply coefs from the appropraite bead calibrations - this will give a corrected fluorescence value
+
+```{r flu_corrections}
+
+#Applying standardision from bead calibrations as found in 'standardisations' spreadsheet
+fb = fb[variable == "FLUORS" & serial == 2757, Mean := 0.0767 + Mean * 1.967] 
+fb[variable == "FLUORS" & serial == 3616, Mean := -0.0483 + Mean * 0.983] 
+
+fb[variable == "FLUORS" & serial == 2757, unit := "Standardised Arb.Units"] # change units of measurement 
+fb[variable == "FLUORS" & serial == 3616, unit := "Standardised Arb.Units"] 
+
+#Visual check of the corrected data over the year
+ggplot(fb[variable == "FLUORS" & Quality==0], aes(dateTime, Mean)) +
+  geom_point(aes(color = serial))
+dygraph(fb[variable=="FLUORS" & Quality==0,.(dateTime, Mean)])
+
+dygraph(dcast.data.table(fb[variable == "FLUORS" & Quality == 0], dateTime ~ serial, value.var = "Mean", fun.aggregate=mean))
+
+```
+  
+# Backscatter
+
+```{r obs}
+
+#initial plots to check data is reasonable, remove data if not
+ggplot(fb[variable == "FTU" & Quality == 0]) +
+  geom_line(aes(dateTime, Mean, color = Cruise))
+ggplot(fb[variable == "FTU" & Quality == 0]) +
+  geom_histogram(aes(Mean), binwidth = 1) + scale_y_log10()
+
+summary(fb[variable == "FTU" & Quality == 0,.(Mean, sd = sqrt(Variance))])
+
+  # flag if high variance
+fb[variable == "FTU" & Quality == 0 & sqrt(Variance) > 10, Quality := 1]
+
+#check for stuck values and flag #FTU
+stuck_value(fb, 16, 3) 
+fb=w
+rm(tester, y, w)
+fb=fb[,telidspecreps:=NULL]
+fb[stuck==T & telid==16 & Quality==0, Quality:=Quality+1]
+
+
+```
+
+# PAR
+
+```{r par_variance}
+#inital plots to explore data, remove suspiscious points if found
+dygraph(fb[variable == "PAR" & Quality == 0, .(dateTime, Mean)])
+hist(sqrt(fb[variable == "PAR"]$Variance), breaks=1000)
+range(fb[Quality == 0 & variable == "PAR"]$Mean)
+dygraph(dcast.data.table(fb[variable == "PAR" & Quality == 0], dateTime ~ Cruise, value.var = "Mean"))
+
+fb[sqrt(Variance) > 100, Quality := 1024] #flag high variance 
+
+#check for stuck values and flag #PAR
+stuck_value(fb, 96, 3)  
+fb=w 
+rm(tester, y, w)
+fb=fb[,telidspecreps:=NULL]
+fb[stuck==T & telid==96 & Quality==0, Quality:=Quality+1]
+
+```
+  
+#complete QA2
+
+```{r, completed QA2}
+#adding QAlevel column
+
+fb[variable %in% c("FLUORS", "TEMP", "SST", "SAL", "FTU", "PAR"), QAlevel := 2] # Where the variable is equal to etc give the row a QAlevel of 2. Add any variables as appropriate
+
+#write fB object of completed qa2a data
+fb[,stuck:=NULL] #remove stuck column
+fb=as.data.table(fb) #ensure data is saved as data table 
+save(fb, file="C:\\Users\\EH08\\Documents\\June 19\\juneferrrybox\\checking scripts\\2015-copy\\2015QA2_complete.rdata")
+load("C:\\Users\\EH08\\Documents\\June 19\\juneferrrybox\\checking scripts\\2015-copy\\2015QA2_complete.rdata")
+```
+
+#QA3
+
+#Deriving SPM 
+```{r derive_spm}
+#using realtionship as derived from full ferrybox series prior to 2019
+#load in coefficients from script that utilises whole ferrybox series and lims discrete
+load("C:\\Users\\EH08\\Documents\\June 19\\juneferrrybox\\checking scripts\\Discrete calibrations (full series)\\spm_coefficients.Rdata")
+turbs=fb[(telid==16)] #isolate turbidity data
+turbs[,telid:=17] #assign new telid for new spm variable
+turbs[,sensor_parameter:=telids[telid==17,sensor_parameter]] #assign sensor parameter name associated with telid 17
+turbs[,variable:="SPM"] #name new variable 
+turbs[,unit:="g m-3"] #add units
+turbs[,Variance:=NA] #remove variance-not applicable for derived product
+turbs[,QAlevel:=3] #update QA level
+turbs[,Mean:= (Mean-coes$coefficients[1])/coes$coefficients[2]] #apply coefficients from ftu-spm regression
+fb=rbind(fb,turbs) #add derived spm to main fb object
+rm(turbs) #remove spm object
+```
+
+#Deriving Chl
+**Chlorophyll not currently derived QA3**
+  
+```{r derive chlorophyll}
+fb[telid==144,unique(serial)] #find unique fluorometer serial numbers
+
+#discrete sample comparison
+#use lims.fetch() function to get chlorphyll data in year range from the lims database
+lims = lims.fetch(parameters=c("CHLOROPHYLL"), after=min(fb$dateTime), before=max(fb$dateTime))#this is extracting data from lims after the first dateTime
+lims=lims[depth>3 & depth<5] #only want depths near inlet
+lims[, `:=`(dateTime, as.POSIXct(round(as.numeric(dateTime)/60) * 
+        60, origin = "1970-01-01", tz = "UTC"))]   #round to nearest minute
+lims=lims[,.(dateTime,latitude,longitude,gear, value,depth, survey,variable)] #only info of interest
+lims=lims[grepl("CEND",survey,ignore.case = TRUE)] #only cend cruises
+setkey(lims,dateTime)
+
+#extract fl data from ferrybox
+fl=fb[telid==144 & Quality==0]
+ggplot(fl)+
+  geom_point(aes(dateTime,Mean))
+fl=fl[,.(sensor_parameter, dateTime, Longitude, Latitude, Speed, Mean, variable,serial, Cruise)]
+    setkey(fl,dateTime)
+    
+#then merge fb and lims
+#from this new limsMerge object you can now run a regression of fb fluorescence against discrete chlorophyll
+xy= merge(fl, lims, suffixes=c("_ferrybox","_discrete"))
+    
+#plots to examine covergae of chlorophyll values
+ggplot(xy)+
+  geom_point(aes(Mean,value,colour=survey))
+
+ggplot(xy)+
+  geom_point(aes(dateTime,Mean), colour="blue")+
+  geom_point(aes(dateTime,value), colour="green")
+
+    eq = xy[, .(eq = lm_eqn(Mean,value), 
+        xpos = min(Mean) + ((max(Mean - min(Mean))/2)), 
+        ypos = max(value))] #equation for all fluorescence vs chlorophyll data from the year
+
+    ggplot(xy)+geom_point(aes(Mean,value))+geom_smooth(aes(Mean,value),method="lm") + geom_text(data = eq, 
+        aes(x = xpos, y = ypos, label = eq), parse = T) + facet_wrap("serial", scales = "free") + theme_bw() +labs( x = "Ferrybox fluorescence", y = "Discrete sample chl")
+    
+        xy=xy[!is.na(Cruise)]
+    #eqauation and plot by cruise
+        eq = xy[, .(eq = lm_eqn(Mean,value), 
+        xpos = min(Mean) + ((max(Mean - min(Mean))/2)), 
+        ypos = max(value)), by = Cruise]
+
+    #plot discrete vs fb by cruise
+    ggplot(xy)+geom_point(aes(Mean,value))+geom_smooth(aes(Mean,value),method="lm") + geom_text(data = eq, 
+        aes(x = xpos, y = ypos, label = eq), parse = T) + facet_wrap("Cruise", scales = "free") + theme_bw() +labs( x = "Ferrybox fluorescence", y = "Discrete sample chl")
+    
+    fits = lapply(unique(xy$Cruise),
+              function(z) lm(value ~ Mean, data = xy[Cruise == z,]
+                             )) # apply linear regression to each cruise
+names(fits) = unique(xy$Cruise)
+
+#looks like cend 3  8  18 and 22 have good relationship-so list below
+cruises=c("CEND_03_15", "CEND_08_15", "CEND_18_15", "CEND_22_15")
+#define function to extract coefficients from 'fits' and apply for given cruise
+get_coeffs<-function(x){
+  
+  int=fits[[x]][["coefficients"]][["(Intercept)"]]
+  slope=fits[[x]][["coefficients"]][["Mean"]]
+  chls=fb[Cruise==x & telid==144 & Quality==0]
+    chls=chls[,':=' (Mean=(Mean*slope)+int, variable="CHL", QAlevel=3, unit="ug/l", telid=145, sensor_parameter="Seapoint chlorophyll flurometer (second)")]
+}
+
+chl=list() #predefine list to store lapply results
+chl=lapply(cruises, get_coeffs) #apply get_coeffs function to list of selected cruises
+chls=rbindlist(chl) #concatenate results
+fb=rbindlist(list(fb, chls)) #add results of discrete deriation to main fb object
+
+plot(chls$dateTime, chls$Mean)
+
+##this step is not complete-a generic relationship is being derived to be applied to other surveys
+```
+
+
+#complete QA3
+
+```{r, completed QA3}
+#adding QAlevel column
+
+fb[variable == c("CHL", "SPM"), QAlevel := 3] # Where the variable is equal to etc give the row a QAlevel of 3. Add any variables as appropriate
+
+#write fb object of completed QA3 data
+#save(fb, file = "C:\\Users\\SH16\\OneDrive - CEFAS\\R\\FerryBox\\FB 2016\\Rdata\\QA2a\\fb_QA3_Complete.rdata")
+```
+
+# Create NetCDF
+
+## Variables:
+to publish: SST, SAL, FTU, FLUORS, SPM, CHL, PAR
+
+```{r netCDF}
+load("C:\\Users\\EH08\\Documents\\June 19\\juneferrrybox\\checking scripts\\2012-copy\\2012QA3_complete.rdata")
+library(ncdf4)
+library(oce)
+fb = fb[QAlevel>=2 & Quality==0] #only qa 2 or higher 
+anyDuplicated((fb))
+serials=fb[,.(unique(serial))]
+setnames(serials,"V1","serial")
+instlist=unique(merge(serials, fb[,.(variable, telid,serial)], by="serial",all.y=F))
+
+#get lats and longs for unique timestamps
+timedat=fb[,.(dateTime, Longitude, Latitude)]
+timedat=timedat[!is.na(dateTime),lapply(.SD,mean,na.rm=T), by= list(dateTime)]
+cruisedat=fb[,.(dateTime,Cruise)]
+cruisedat=unique(cruisedat, by=c("dateTime", "Cruise"))
+datetimedat=merge(timedat, cruisedat, by="dateTime")
+
+# get parameter info from csv
+fb_params=as.data.table(read.csv("C:\\Users\\EH08\\Documents\\June 19\\juneferrrybox\\checking scripts\\ferrybox parameters.csv",header=T,stringsAsFactors = F))
+
+#make netcdf
+#define dimensions
+#dimensions will be trajectory
+traj_dim=ncdim_def("trajectory", "", 1, longname="Cefas Endeavour Ferrybox Data 2012")
+obs_dim=ncdim_def("obs", "", 1:length(unique(as.numeric(fb$dateTime))) )
+
+#define variables
+#latitude
+nc_lat=ncvar_def("latitude", "degrees_north", list(traj_dim, obs_dim), missval=-99999,prec='double')
+#longitude
+nc_lon=ncvar_def("longitude", "degrees_east", list(traj_dim, obs_dim), missval=-99999,prec='double')
+#crs
+nc_crs=ncvar_def("crs","",list())
+#depth
+nc_depth=ncvar_def("depth", "metres", list(traj_dim, obs_dim), missval=-99999, prec='double')
+#time
+nc_time=ncvar_def("time", "seconds since 1970-01-01 00:00:00 UTC", list(traj_dim, obs_dim), missval=-99999, prec='double')
+#cruise  need special treatment as is a character string
+char_dim=ncdim_def("nchar","",1:20, create_dimvar = F)
+nc_cruise=ncvar_def("cruise", "", list(char_dim, obs_dim), prec='char')
+
+test_list=(list(nc_time,nc_lat, nc_lon, nc_crs, nc_depth, nc_cruise))
+
+#define other variables
+for (var in fb_params$telid){
+  print(var)
+  if (any(unique(fb$telid==var))){
+  metadata=fb_params[telid==var]
+  nc_var=ncvar_def(metadata$parameter, metadata$units, list(traj_dim, obs_dim), missval=metadata$X_fillvalue, longname = metadata$long_name)#define varible for given var
+  assign(paste("nc_", metadata$parameter,sep=""), nc_var) #rename nc_var to indicate which variable this object conscerns
+  test_list[[length(test_list)+1]]<-eval(parse(text = (paste("nc_", metadata$parameter,sep="")))) #add to list which will later be used in netcdf creation 
+rm(nc_var)
+if (var!=145){
+  if (var!=17){
+nc_var=ncvar_def(metadata$instid, "", list(traj_dim, obs_dim), longname = metadata$sensor_name)
+assign(paste("nc_", metadata$instid,sep=""), nc_var) 
+test_list[[length(test_list)+1]]<-eval(parse(text = (paste("nc_", metadata$instid,sep=""))))
+}
+}
+rm(nc_var)
+}
+}
+
+
+new_nc=nc_create("Fb2012.nc", test_list)
+
+#now add data to netcdf
+#time
+ncvar_put(new_nc, nc_time, unique(fb$dateTime))
+#ncatt_put
+ncatt_put(new_nc, nc_time, "standard_name", "time")
+ncatt_put(new_nc, nc_time, "calendar", "gregorian")
+ncatt_put(new_nc, nc_time, "axis", "T")
+
+#get latitudes by unique datetime 
+#latitude
+ncvar_put(new_nc, nc_lat, datetimedat[,Latitude])
+#ncatt_put
+ncatt_put(new_nc, nc_lat, "standard_name", "latitude")
+ncatt_put(new_nc, nc_lat, "units", "degrees_north")
+ncatt_put(new_nc, nc_lat, "axis", "Y")
+ncatt_put(new_nc, nc_lat, "valid_min", "-90")
+ncatt_put(new_nc, nc_lat, "valid_max", "90")
+ncatt_put(new_nc, nc_lat, "grid_mapping", "crs")
+ncatt_put(new_nc, nc_lat, "axis", "Y")
+
+#longitude
+ncvar_put(new_nc, nc_lon, datetimedat[,Longitude])
+ncatt_put(new_nc, nc_lon, "standard_name", "longitude")
+ncatt_put(new_nc, nc_lon, "units", "degrees_east")
+ncatt_put(new_nc, nc_lon, "axis", "X")
+ncatt_put(new_nc, nc_lon, "valid_min", "-180")
+ncatt_put(new_nc, nc_lon, "valid_max", "180")
+ncatt_put(new_nc, nc_lon, "grid_mapping", "crs")
+ncatt_put(new_nc, nc_lon, "axis", "X")
+
+#crs
+ncatt_put(new_nc, nc_crs, "grid_mapping_name", "latitude_longitude")
+ncatt_put(new_nc, nc_crs, "espg_code", "ESPG:4326")
+ncatt_put(new_nc, nc_crs, "longitude_of_prime_meridian", 0.0)
+ncatt_put(new_nc, nc_crs, "longitude_of_prime_meridian", 6378137.0)
+ncatt_put(new_nc, nc_crs, "inverse_flattening", 298.257223563)
+
+#depth
+ncvar_put(new_nc,nc_depth, rep(4, times=length(unique(fb$dateTime))))
+ncatt_put(new_nc, nc_depth, "standard_name", "depth")
+ncatt_put(new_nc, nc_depth, "units", "metres")
+ncatt_put(new_nc, nc_depth, "long_name", "nominal depth of water inlet")
+ncatt_put(new_nc, nc_depth, "axis", "Z")
+
+#cruise
+ncvar_put(new_nc,nc_cruise, datetimedat[,Cruise])
+ncatt_put(new_nc, nc_cruise, "long_name", "survey on which sample was recorded")
+
+# need to fill value where varibale does not exist for timestamp!!!
+
+for (var in fb_params$telid){
+  print(var)
+
+  if (any(unique(fb$telid==var))){
+  metadata=fb_params[telid==var]
+  vardata=fb[telid==var]
+  vardata=dcast.data.table(vardata, dateTime+serial~variable, value.var=c("Mean"), fun.aggregate = mean) #get data for given variable
+  vardata=merge(vardata, datetimedat, by="dateTime", all.y=T) #merge with dtetime vector 
+  vardata[is.na(vardata)]=-99999 #replace nas with -99999
+  varserials=vardata[,2]
+  vardata=vardata[,3]
+  
+  #add new var data to netcdf
+  ncvar_put(new_nc, eval(parse(text = (paste("nc_", metadata$parameter,sep="")))), as.matrix(vardata))
+    ncatt_put(new_nc, eval(parse(text = (paste("nc_", metadata$parameter,sep="")))), "standard_name", metadata$standard_name)
+  ncatt_put(new_nc, eval(parse(text = (paste("nc_", metadata$parameter,sep="")))), "instrument", metadata$instid)
+      ncatt_put(new_nc, eval(parse(text = (paste("nc_", metadata$parameter,sep="")))), "valid_min", metadata$valid_min)
+    ncatt_put(new_nc, eval(parse(text = (paste("nc_", metadata$parameter,sep="")))), "valid_max", metadata$valid_max)
+    ncatt_put(new_nc, eval(parse(text = (paste("nc_", metadata$parameter,sep="")))), "grid_mapping", "crs")
+    
+      #add varb instrument to netcdf-but not for chl or spm
+  if (var!=145){
+    if (var!= 17){
+    ncatt_put(new_nc, eval(parse(text = (paste("nc_", metadata$instid,sep="")))), "nodc_name", metadata$nodc_name)
+    ncatt_put(new_nc, eval(parse(text = (paste("nc_", metadata$instid,sep="")))), "make_model", metadata$sensor_make)
+    ncvar_put(new_nc, eval(parse(text = (paste("nc_", metadata$instid,sep="")))), as.matrix(varserials))
+    ncatt_put(new_nc, eval(parse(text = (paste("nc_", metadata$instid,sep="")))), "instrument precision", as.character(metadata$precision))
+    }
+  }
+  }
+}
+
+yr=2012
+
+#write global attributes-to develop-not working yet
+ncatt_put(new_nc, 0, "id",paste(paste(yr,"fb",sep="")))
+ncatt_put(new_nc, 0, "title", paste("Cefas Endeavour ferrybox time series from", paste(yr,collapse=", ")))
+ncatt_put( new_nc, 0, "ncei_template_version","NCEI_NetCDF_Trajectory_Incomplete _Template_v2.0")
+ncatt_put(new_nc, 0, "featureType","trajectory")
+ncatt_put(new_nc, 0, "summary",paste("Ferrybox ", paste(sel_cruise,collapse=", "),". Parameters include: sea surface temperature, sea surface salinity, chlorophyll concentration, suspended particulate matter, photosynthetically active radiation"))
+ncatt_put(new_nc, 0, "keywords","EARTH SCIENCE > Oceans > Ocean Temperature > Water Temperature, EARTH SCIENCE > Oceans > Ocean Optics > Photosynthetically Active Radiation, EARTH SCIENCE > Oceans > Ocean Optics > Turbidity, EARTH SCIENCE > Oceans > Ocean Optics > Fluorescence, EARTH SCIENCE > Oceans > Salinity/Density > Salinity, EARTH SCIENCE > Oceans > Ocean Pressure > Water Pressure, EARTH SCIENCE > Oceans > Ocean Chemistry > Oxygen, EARTH SCIENCE > Oceans > Ocean Chemistry > Chlorophyll, EARTH SCIENCE > Oceans > Ocean Chemistry > Suspended Solids")
+ncatt_put(new_nc, 0, "keywords_vocabluary","GCMD:GCMD Keywords")
+ncatt_put(new_nc, 0, "Conventions","CF-1.6, ACDD-1.3")
+ncatt_put(new_nc, 0, "naming_authority","uk.co.cefas")
+ncatt_put(new_nc, 0, "source","4H JENA Ferrybox system")
+ncatt_put(new_nc, 0, "processing_level","Quality Controlled (Level 2")
+ncatt_put(new_nc, 0, "licence","OGLv3.0 https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/") 
+ncatt_put(new_nc, 0, "standard_name_volcabulary","CF Standard Name Table v39")
+ncatt_put(new_nc, 0, "date_created", strftime(lubridate::now(tzone="UTC"), "%Y-%M-%dT%H:%M:%SZ"))
+ncatt_put(new_nc, 0, "creator","Eleanor Haigh")
+ncatt_put(new_nc, 0, "creator_email","eleanor.haigh@cefas.co.uk")
+ncatt_put(new_nc, 0, "creator_url","http://www.cefas.co.uk")
+ncatt_put(new_nc, 0, "institution","Centre for Environment Fisheries and Aquaculture Science")
+ncatt_put(new_nc, 0, "acknowledgment","")
+ncatt_put(new_nc, 0, "project","DP705")
+ncatt_put(new_nc, 0, "geospatial_lat_min",min(datetimedat$Latitude[datetimedat$Latitude!=-99999]))
+ncatt_put(new_nc, 0, "geospatial_lat_max",max(datetimedat$Latitude[datetimedat$Latitude!=-99999]))
+ncatt_put(new_nc, 0, "geospatial_lon_min",min(datetimedat$Longitude[datetimedat$Longitude!=-99999]))
+ncatt_put(new_nc, 0, "geospatial_lon_max",max(datetimedat$Longitude[datetimedat$Longitude!=-99999]))
+ncatt_put(new_nc, 0, "geospatial_lat_units","degrees_north")
+ncatt_put(new_nc, 0, "geospatial_lon_units","degrees_east")
+ncatt_put(new_nc, 0, "time_coverage_start", as.character(min(datetimedat$dateTime[datetimedat$dateTime!=-99999])))
+ncatt_put(new_nc, 0, "time_coverage_end",as.character(max(datetimedat$dateTime[datetimedat$dateTime!=-99999])))
+ncatt_put(new_nc, 0, "cdm_data_type","Trajectory")
+ncatt_put(new_nc, 0, "references","doi::")
+
+
+nc_sync(new_nc)
+
+nc_close(new_nc)
+```
+
+
+
+#Steps that require developement
+
+All step below need furhter development and testing. None of the below have been applied to any FB data. 
+This is due to time constraints, and lack in availbale data - for example conlog
+These steps are beneficial but not fundamental
+##Conlog step
+
+Note that this Conlog step is not finalised - and has not been completed for any of the years yet. Therefore, there will be missing fb data (due to lack of gps). 
+
+The aim is to implement this step at a later date.It will be in QA1 after GPS step. 
+
+The conlog file is extracted fromt he Endeavour, wiher ask Bill Meadows for this file or ask the Master on the Endeavour.
+
+```{r read_conlog, eval=F}
+conlog_files = list.files("conlog/", pattern="*.csv", recursive=T, full.names=T)
+conlog = lapply(conlog_files, read.ferrybox.conlog)
+conlog = rbindlist(conlog)
+conlog = unique(conlog)
+
+  # reshape and calculate positions
+conlog = dcast.data.table(conlog, Time ~ parameter, value.var="value", fun.aggregate=mean)
+
+  # need to handle dates bring wrong around midnight
+conlog[, decimal_time := (hour(Time)*3600 + minute(Time)*60 + second(Time)) / 86400]
+conlog[, GLL_date := as.Date(Time)]
+conlog[(decimal_time - GLL_time) > 0.9, GLL_date := GLL_date + 1] # correct for midnight
+conlog[, fix_time := GLL_time*86400 + as.numeric(as.POSIXct(GLL_date, tz="UTC"))]
+conlog[, fix_time := as.POSIXct(fix_time, origin="1970-01-01", tz="UTC")]
+
+  # conlog is instant value on the minute
+conlog[, dateTime := as.POSIXct(ceiling(as.numeric(fix_time)/60)*60, origin="1970-01-01", tz="UTC")]
+
+conlog[, Lat := convert_latlong(LAT_deg, LAT_min)]
+conlog[LON_hem_as_num == 90, EW := "E"]
+conlog[LON_hem_as_num == 270, EW := "W"]
+conlog[, Lon := convert_latlong(LON_deg, LON_min, EW)]
+conlog = conlog[, lapply(.SD, median), .SDcols=c("Lat", "Lon"), by=dateTime]
+save(conlog, file="conlog_2016.rdata")
+```
+
+```{r conlog_verification}
+  # check processing is correct
+load("conlog_2016.rdata")
+
+conlog = unique(conlog) # remove duplicates
+  # check it's sane
+conlog = conlog[Lat %between% c(40, 65) & Lon %between% c(-30, 30)]
+conlog[Lon == 0 & Lat == 0, c("Lat", "Lon") := NA] # remove 0 position
+# odd bug in conlog data for 2016, time at 10:46 is wrong
+conlog[hour(dateTime) == 10 & minute(dateTime) == 46, c("Lat", "Lon") := NA]
+
+conlog[, c("dLat", "dLon") := list(sd(Lat), sd(Lon)), by=round_minute(dateTime, 10)]
+  # remove stuck conlog values
+conlog[dLat < 1e-05 & dLon < 1e-05, c("Lat", "Lon") := NA]
+conlog = na.omit(conlog)
+
+  # check conlog isn't doing stupid things around 0 lat
+ggplot(conlog[Lon %between% c(-0.05, 0.05)]) +
+  geom_point(aes(Lon, Lat, color="conlog"))
+
+  # merge the track and conlog so we can compare timestamps / positions
+x = merge(track, conlog, by="dateTime")[, .(dateTime, Latitude, Longitude, Speed, Lat, Lon, stuck)]
+
+  # distance between conlog/ferrybox 
+x[, dist_conlog := geosphere::distGeo(cbind(Longitude, Latitude), cbind(Lon, Lat))]
+max(x$dist_conlog, na.rm=T)
+
+  # maximum expected disparity ~463m (0.514*60*15) 15 knots to meters per minute
+x[dist_conlog > 500] # this is indicative of clock drift
+
+# ggplot(x) + geom_point(aes(dateTime, dist_conlog))
+ggplot(x) + geom_point(aes(dateTime, dist_conlog))
+
+lm(x$Lat ~ x$Latitude)
+```
+
+
+```{r fill_from_conlog}
+track = merge(track, conlog[,.(dateTime, Lat, Lon)], by="dateTime", all=T)
+track[is.na(Latitude), Latitude := Lat]
+track[is.na(Longitude), Longitude := Lon]
+track = track[!is.na(Longitude) | !is.na(Latitude),.(dateTime, Latitude, Longitude, Speed, Course)]
+
+  # check for unique position at each timestamp
+track[, n := 1:nrow(.SD), by=dateTime]
+track[n > 1] # yay
+
+```
+
+# Stuck values
+This requires more clarification. 
+
+```{r stuck_values}
+  # 30 minute filter
+fb[Variance == 0 & Quality == 0, roll_sd := sd(Mean), by = list(round_minute(dateTime), variable)]
+fb[roll_sd == 0 & Quality == 0 & variable == "SST"]
+#not 100% sure what is going on here
+
+
+ggplot(fb[roll_sd == 0 & Quality == 0]) +
+  geom_point(aes(dateTime, Mean)) +
+  facet_grid(variable ~ ., scales = "free_y")
+
+```
+
+# Validate against SmartBuoy
+
+```{r smartbuoy_match}
+
+sb_positions = smartbuoy.positions()[platform == "SmartBuoy" & dateTo > min(fb$dateTime)]
+
+fb_sb = copy(fb[variable %in% c("SAL", "PAR") & Quality == 0])
+
+for(buoy in sb_positions$deployment){
+  buoypos = sb_positions[deployment == buoy,.(lon, lat)]
+  fb_sb[,dist := geosphere::distGeo(data.frame(Longitude, Latitude), buoypos)]
+  fb_sb[dist < 2000, deployment_group := buoy]
+}
+fb_sb[, dist := NULL]
+
+sb = smartbuoy.fetch(deployment_group=unique(fb$near_sb),
+                     parameters=c("SAL", "PAR"),
+                     after=min(fb$dateTime), before=max(fb$dateTime))[depth < 2]
+
+sb[, dateTime := round_minute(dateTime, 5)]
+fb_sb[,.(Mean = mean(Mean)), by = list(dateTime, variable, deployment_group)]
+
+fb_sb = merge(fb_sb, sb[,.(dateTime, deployment_group, sb_Mean = value, variable = par)],
+              by = c("dateTime", "deployment_group", "variable"))
+
+ggplot(fb_sb) +
+  geom_point(aes(Mean, sb_Mean)) +
+  geom_smooth(aes(Mean, sb_Mean), method = lm) +
+  facet_wrap("variable", scales = "free") +
+  coord_equal() + labs(x="Ferrybox", y="Buoy")
+
+  # par outlier
+fb_sb[variable == "PAR" & Mean > 1500 & sb_Mean < 750]
+xlim = as.POSIXct(c("2016-08-03", "2016-08-04"))
+ggplot(fb[variable == "PAR" & Quality == 0]) +
+  geom_point(aes(dateTime, Mean)) +
+  geom_point(data=sb[par=="PAR"], aes(dateTime, value, color = deployment_group))
+```
+
+## validate MET against ECMWF
+
+Stream:Atmospheric model
+Area:58.0°N 10.0°W 48.0°N 8.0°E
+Dataset:cams_nrealtime
+Step:0
+Version:1
+Type of level:Surface
+Date:20160101 to 20161231
+Grid:0.125° x 0.125°
+Parameter:10 metre U wind component, 10 metre V wind component, 2 metre temperature, Sea surface temperature
+Class:MACC
+Type:Analysis
+Time:00:00:00, 06:00:00, 12:00:00, 18:00:00
+Type:Forecast
+Time:00:00:00, 12:00:00
+
+```{r ECMWF}
+ecmwf = read.ecmwf("ECMWF_cams_nrealtime_uk_2016.nc")
+MET = copy(fb[variable %in% c("AIRT", "BAROPR", "WINDRD", "WINDRS") & Quality == 0,
+              .(time = dateTime,
+                longitude = Longitude,
+                latitude = Latitude,
+                Mean, variable, Heading)])
+MET[, time := round_minute(time, 60*6)]
+MET[, latitude := round(latitude/0.125)*0.125]
+MET[, longitude := round(longitude/0.125)*0.125]
+MET = dcast.data.table(MET, time + longitude + latitude + Heading ~ variable,
+                       value.var = "Mean", fun.aggregate = mean, na.rm = T)
+MET = merge(MET, ecmwf, by = c("time", "latitude", "longitude"))
+
+ggplot(MET[month(time) == 3]) +
+  geom_point(aes(time, WINDRS, color = "Endeavour")) +
+  geom_point(aes(time, wsp, color = "ECMWF"))
+
+ggplot(MET) +
+  geom_point(aes(wsp, WINDRS))
+
+MET[wsp < 1 & WINDRS > 10]
+```
+
+
